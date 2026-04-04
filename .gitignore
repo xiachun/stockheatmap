@@ -1,0 +1,5 @@
+.env
+node_modules
+.DS_Store
+data/ifind-debug.log
+data/exports/
