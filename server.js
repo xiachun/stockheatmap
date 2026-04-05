@@ -57,6 +57,7 @@ const CACHE_MAX_ENTRIES = {
 };
 const CACHE_SWEEP_INTERVAL_MS = envInt("CACHE_SWEEP_INTERVAL_MS", 10 * 60 * 1000);
 const JSON_COMPRESS_MIN_BYTES = envInt("JSON_COMPRESS_MIN_BYTES", 2048);
+const LATEST_FORCE_REFRESH_MIN_INTERVAL_MS = envInt("LATEST_FORCE_REFRESH_MIN_INTERVAL_MS", 1000);
 
 const INDEXES = [
   ["801010.SL", "农林牧渔"],
@@ -294,10 +295,6 @@ async function buildHeatmap(query) {
     range.hasTrades ? "1" : "0"
   ].join("|");
   const heatmapTtl = preset === "latest" ? CACHE_TTL.heatmapLatest : CACHE_TTL.heatmapHistory;
-  if (forceLatestRefresh) {
-    CACHE.heatmap.delete(heatmapCacheKey);
-  }
-
   return cachedAsync(CACHE.heatmap, heatmapCacheKey, heatmapTtl, async () => {
     if (!range.hasTrades) {
       return buildNoTradeHeatmap(range);
@@ -305,6 +302,9 @@ async function buildHeatmap(query) {
     return timed(`buildHeatmapFromResolvedRange(${range.preset})`, () =>
       buildHeatmapFromResolvedRange(range, { forceLatestRefresh })
     );
+  }, {
+    forceRefresh: forceLatestRefresh,
+    minRefreshIntervalMs: forceLatestRefresh ? LATEST_FORCE_REFRESH_MIN_INTERVAL_MS : 0
   });
 }
 
@@ -903,9 +903,6 @@ function buildSectorMembershipMap(membersBySector) {
 async function fetchRealtimeReturns(codes, options = {}) {
   const indicator = REALTIME_RETURN_INDICATOR;
   const key = `rt:${indicator}:${codesHash(codes)}`;
-  if (options.forceRefresh === true) {
-    CACHE.returns.delete(key);
-  }
   return cachedAsync(CACHE.returns, key, CACHE_TTL.returnsLatest, async () => {
     const out = new Map();
     await fetchCodesWithFallback(codes, 80, 3, async (part) => {
@@ -920,6 +917,9 @@ async function fetchRealtimeReturns(codes, options = {}) {
       }
     });
     return out;
+  }, {
+    forceRefresh: options.forceRefresh === true,
+    minRefreshIntervalMs: options.forceRefresh === true ? LATEST_FORCE_REFRESH_MIN_INTERVAL_MS : 0
   });
 }
 
@@ -1574,7 +1574,7 @@ function csvCell(value) {
   return s;
 }
 
-async function cachedAsync(cache, key, ttlMs, loader) {
+async function cachedAsync(cache, key, ttlMs, loader, options = {}) {
   const now = Date.now();
   const entry = cache.get(key);
   if (entry?.pending) {
@@ -1583,29 +1583,46 @@ async function cachedAsync(cache, key, ttlMs, loader) {
     }
     return entry.pending;
   }
-  if (entry && "value" in entry && entry.expiresAt > now) {
+  const forceRefresh = options.forceRefresh === true;
+  const minRefreshIntervalMs = forceRefresh ? Math.max(0, Number(options.minRefreshIntervalMs) || 0) : 0;
+  if (forceRefresh && entry && "value" in entry) {
+    const refreshedAt = Number(entry.refreshedAt || 0);
+    if (Number.isFinite(refreshedAt) && refreshedAt > 0 && now - refreshedAt < minRefreshIntervalMs) {
+      if (DEBUG) {
+        debugLog("[cache]", "throttle", shortKey(key), `${now - refreshedAt}ms`);
+      }
+      return entry.value;
+    }
+  }
+  if (!forceRefresh && entry && "value" in entry && entry.expiresAt > now) {
     if (DEBUG) {
       debugLog("[cache]", "hit", shortKey(key));
     }
     return entry.value;
   }
   if (DEBUG) {
-    debugLog("[cache]", "miss", shortKey(key));
+    debugLog("[cache]", forceRefresh ? "refresh" : "miss", shortKey(key));
   }
 
+  const token = Symbol(String(key));
   const pending = (async () => {
     try {
       const value = await loader();
-      cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-      trimCacheToMax(cache);
+      if (cache.get(key)?.token === token) {
+        const refreshedAt = Date.now();
+        cache.set(key, { value, expiresAt: refreshedAt + ttlMs, refreshedAt });
+        trimCacheToMax(cache);
+      }
       return value;
     } catch (error) {
-      cache.delete(key);
+      if (cache.get(key)?.token === token) {
+        cache.delete(key);
+      }
       throw error;
     }
   })();
 
-  cache.set(key, { pending, expiresAt: now + ttlMs });
+  cache.set(key, { pending, expiresAt: now + ttlMs, token });
   trimCacheToMax(cache);
   return pending;
 }
