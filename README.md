@@ -13,7 +13,8 @@
 - 页面展示的是“按申万一级行业分组的市场热力图”
 - 当前默认样本空间不是全 A，而是一个样本指数成分股集合
 - 默认样本指数为 `000300.SH`，即沪深 300
-- 样本指数可通过 `IFIND_SAMPLE_INDEX_CODE` 和 `IFIND_SAMPLE_INDEX_NAME` 覆盖
+- 样本指数代码可通过 `IFIND_SAMPLE_INDEX_CODE` 覆盖
+- 样本指数名称可通过 `IFIND_SAMPLE_INDEX_NAME` 显式指定；未指定时会自动向 iFinD 查询指数简称
 - 行业权重来自样本股在权重基准日的流通市值
 - 行业涨跌幅来自对应申万一级行业指数的涨跌幅
 - 页面 drilldown 到行业后，显示的是该行业内样本股热力图
@@ -35,29 +36,36 @@
 
 ### 1. 准备凭证
 
-程序不会从本地 `.env` 读取凭证。
+服务端启动时会自动读取仓库根目录的 `.env`。
 
-必须先在 shell 中导出 `THS_REFRESH_TOKEN`：
+你可以任选一种方式提供 `THS_REFRESH_TOKEN`：
+
+方式一：写入 `.env`
+
+```zsh
+echo "THS_REFRESH_TOKEN=your_ifind_refresh_token" >> .env
+```
+
+方式二：在当前 shell 中导出
 
 ```zsh
 export THS_REFRESH_TOKEN='your_ifind_refresh_token'
 ```
 
-如果你希望每次新开 shell 都生效，可以把这条配置放到自己的 shell 启动文件里，例如 `~/.zshrc`。
+如果两处都设置了同名变量，以 shell 环境变量为准。
 
 ### 2. 可选环境变量
 
-仓库中的 [`.env.example`](.env.example) 仅作为配置示例，不会被程序自动加载。
+仓库中的 [`.env.example`](.env.example) 提供可直接参考的配置示例。
 
 常用可选项：
 
 ```zsh
-export PORT=3000
-export IFIND_DEBUG=0
-export IFIND_SAMPLE_INDEX_CODE=000300.SH
-export IFIND_SAMPLE_INDEX_NAME=沪深300
-export IFIND_REALTIME_RETURN_INDICATOR=changeRatio
-export IFIND_FLOAT_MV_INDICATOR=ths_current_mv_stock
+PORT=3000
+IFIND_DEBUG=0
+IFIND_SAMPLE_INDEX_CODE=000300.SH
+# 可选；不填时自动向 iFinD 查询指数简称
+# IFIND_SAMPLE_INDEX_NAME=沪深300
 ```
 
 ### 3. 启动服务
@@ -107,6 +115,11 @@ npm run build:sector-db
 ### 2. 获取样本指数成分股
 
 服务端按 `weightAnchorDate` 从 iFinD 获取样本指数成分股，因此样本股不是写死的，会随查询日期变化。
+
+样本指数名称的显示规则：
+- 如果配置了 `IFIND_SAMPLE_INDEX_NAME`，优先使用该值
+- 如果只配置了 `IFIND_SAMPLE_INDEX_CODE`，服务端会调用 iFinD 的 `ths_index_short_name_index` 自动补全简称
+- 如果自动查询失败，则回退显示指数代码
 
 ### 3. 映射到申万一级行业
 
@@ -206,7 +219,7 @@ npm run build:sector-db
   当前项目用到的 iFinD 接口说明与示例
 
 - [`.env.example`](.env.example)
-  非凭证配置示例
+  本地环境变量示例
 
 ## 缓存与性能
 
@@ -258,7 +271,7 @@ npm run build:sector-db
 
 如果要先确认程序运行链路，最短路径是：
 
-1. 在 shell 中导出 `THS_REFRESH_TOKEN`
+1. 在 `.env` 或当前 shell 中设置 `THS_REFRESH_TOKEN`
 2. 启动 `node server.js`
 3. 打开本地页面
 4. 从 `POST /api/heatmap` 开始顺着服务端数据流阅读

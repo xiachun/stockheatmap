@@ -1,16 +1,24 @@
 import { createServer } from "node:http";
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync } from "node:fs";
 import { extname, join, normalize } from "node:path";
 import { URL } from "node:url";
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from "node:zlib";
 
+loadEnvFile(join(process.cwd(), ".env"));
+
+const DEFAULT_SAMPLE_INDEX = { code: "000300.SH", name: "沪深300" };
 const PORT = Number(process.env.PORT || 3000);
 const DEBUG = process.env.IFIND_DEBUG === "1";
 const API_BASE = "https://quantapi.51ifind.com/api/v1";
 const TRADE_MARKET_CODE = "212001"; // 上交所，A股交易日历与深交所一致
-const SAMPLE_INDEX_CODE = process.env.IFIND_SAMPLE_INDEX_CODE || "000300.SH";
-const SAMPLE_INDEX_NAME = process.env.IFIND_SAMPLE_INDEX_NAME || (SAMPLE_INDEX_CODE === "000300.SH" ? "沪深300" : SAMPLE_INDEX_CODE);
+const SAMPLE_INDEX_CODE = process.env.IFIND_SAMPLE_INDEX_CODE || DEFAULT_SAMPLE_INDEX.code;
+const SAMPLE_INDEX_NAME_OVERRIDE = String(process.env.IFIND_SAMPLE_INDEX_NAME || "").trim();
+const SAMPLE_INDEX_FALLBACK_NAME = SAMPLE_INDEX_CODE === DEFAULT_SAMPLE_INDEX.code
+  ? DEFAULT_SAMPLE_INDEX.name
+  : SAMPLE_INDEX_CODE;
+const REALTIME_RETURN_INDICATOR = "changeRatio";
+const FLOAT_MV_INDICATOR = "ths_current_mv_stock";
 const BENCHMARK_INDEXES = [
   { code: "000300.SH", name: "沪深300" },
   { code: "399006.SZ", name: "创业板指" }
@@ -228,6 +236,10 @@ const ifind = new IFindClient();
 let sectorDbCache = null;
 let sectorDbMeta = { effectiveDate: null, updatedAt: null };
 let debugLogDirReady = false;
+const runtimeMeta = {
+  sampleIndexName: SAMPLE_INDEX_NAME_OVERRIDE || null,
+  sampleIndexNamePending: null
+};
 
 const server = createServer(async (req, res) => {
   try {
@@ -382,9 +394,10 @@ async function exportAuditCsv(query) {
 async function buildHeatmapFromResolvedRange(range, options = {}) {
   const includeAudit = options.includeAudit === true;
   const forceLatestRefresh = options.forceLatestRefresh === true;
+  const sampleIndexName = await getSampleIndexName();
   const sampleMembers = await timed("fetchSampleMembers", () => fetchSampleMembers(range.weightAnchorDate));
   if (!sampleMembers.length) {
-    throw new Error(`未获取到样本指数成分股: ${SAMPLE_INDEX_CODE}`);
+    throw new Error(`未获取到样本指数成分股: ${sampleIndexName} (${SAMPLE_INDEX_CODE})`);
   }
 
   const sectorByStock = await timed("getSectorMapForSample", () => getSectorMapForSample(sampleMembers, range.weightAnchorDate));
@@ -410,7 +423,7 @@ async function buildHeatmapFromResolvedRange(range, options = {}) {
 
   const allCodes = Array.from(stockMap.keys());
   if (!allCodes.length) {
-    throw new Error(`样本指数成分无法映射到申万一级行业: ${SAMPLE_INDEX_CODE}`);
+    throw new Error(`样本指数成分无法映射到申万一级行业: ${sampleIndexName} (${SAMPLE_INDEX_CODE})`);
   }
 
   const weightDate = range.weightAnchorDate;
@@ -578,7 +591,7 @@ async function buildHeatmapFromResolvedRange(range, options = {}) {
       returnPct: round(marketReturn, 2),
       sampleSize: allCodes.length,
       totalFloatMv: round(totalMv, 2),
-      sampleUniverse: `${SAMPLE_INDEX_NAME}成分股（按申万一级行业分类）`,
+      sampleUniverse: `${sampleIndexName}成分股（按申万一级行业分类）`,
       sampleStockWeightedReturnPct: round(sampleStockWeightedReturn, 2)
     },
     benchmarks,
@@ -714,7 +727,8 @@ async function getSectorMapForSample(sampleMembers, endDate) {
   const refreshed = await refreshAndSaveSectorDb(latestTradeDate);
   const stillMissing = sampleMembers.filter((x) => !refreshed.has(x.code)).map((x) => x.code);
   if (stillMissing.length && DEBUG) {
-    debugWarn(`${SAMPLE_INDEX_NAME} 成分未匹配申万一级行业(示例):`, stillMissing.slice(0, 10));
+    const sampleIndexName = await getSampleIndexName();
+    debugWarn(`${sampleIndexName} 成分未匹配申万一级行业(示例):`, stillMissing.slice(0, 10));
   }
   return refreshed;
 }
@@ -803,6 +817,59 @@ async function fetchSampleMembers(weightAnchorDate) {
   );
 }
 
+async function getSampleIndexName() {
+  if (runtimeMeta.sampleIndexName) {
+    return runtimeMeta.sampleIndexName;
+  }
+  if (runtimeMeta.sampleIndexNamePending) {
+    return runtimeMeta.sampleIndexNamePending;
+  }
+
+  runtimeMeta.sampleIndexNamePending = (async () => {
+    try {
+      const name = await fetchIndexShortName(SAMPLE_INDEX_CODE);
+      runtimeMeta.sampleIndexName = name || SAMPLE_INDEX_FALLBACK_NAME;
+    } catch (error) {
+      runtimeMeta.sampleIndexName = SAMPLE_INDEX_FALLBACK_NAME;
+      if (DEBUG) {
+        debugWarn(
+          "[sample-index-name]",
+          `code=${SAMPLE_INDEX_CODE}`,
+          `fallback=${SAMPLE_INDEX_FALLBACK_NAME}`,
+          `message=${error.message || String(error)}`
+        );
+      }
+    }
+    return runtimeMeta.sampleIndexName;
+  })();
+
+  try {
+    return await runtimeMeta.sampleIndexNamePending;
+  } finally {
+    runtimeMeta.sampleIndexNamePending = null;
+  }
+}
+
+async function fetchIndexShortName(indexCode) {
+  const data = await ifind.post("/basic_data_service", {
+    codes: indexCode,
+    indipara: [
+      {
+        indicator: "ths_index_short_name_index",
+        indiparams: []
+      }
+    ]
+  });
+
+  for (const row of data.tables || []) {
+    const name = String(row.table?.ths_index_short_name_index?.[0] || "").trim();
+    if (name) {
+      return name;
+    }
+  }
+  return "";
+}
+
 async function fetchIndexMembers(indexCode, endDate) {
   const date = toYYYYMMDD(endDate);
   const output = ["p03473_f002", "p03473_f003"];
@@ -834,7 +901,7 @@ function buildSectorMembershipMap(membersBySector) {
 }
 
 async function fetchRealtimeReturns(codes, options = {}) {
-  const indicator = process.env.IFIND_REALTIME_RETURN_INDICATOR || "changeRatio";
+  const indicator = REALTIME_RETURN_INDICATOR;
   const key = `rt:${indicator}:${codesHash(codes)}`;
   if (options.forceRefresh === true) {
     CACHE.returns.delete(key);
@@ -917,7 +984,7 @@ async function fetchNDReturns(codes, date, nd) {
 
 async function fetchFloatMVs(codes, endDate) {
   return cachedAsync(CACHE.floatMv, `mv:${endDate}:${codesHash(codes)}`, CACHE_TTL.floatMv, async () => {
-    const indicator = process.env.IFIND_FLOAT_MV_INDICATOR || "ths_current_mv_stock";
+    const indicator = FLOAT_MV_INDICATOR;
     const out = new Map();
     await fetchCodesWithFallback(codes, 80, 3, async (part) => {
       const data = await ifind.post("/date_sequence", {
@@ -1269,6 +1336,40 @@ function envInt(name, fallback) {
   }
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+function loadEnvFile(filePath) {
+  if (!existsSync(filePath)) {
+    return;
+  }
+
+  const text = readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+
+    const normalized = line.startsWith("export ") ? line.slice(7).trim() : line;
+    const equalIndex = normalized.indexOf("=");
+    if (equalIndex <= 0) {
+      continue;
+    }
+
+    const key = normalized.slice(0, equalIndex).trim();
+    if (!key || process.env[key] !== undefined) {
+      continue;
+    }
+
+    let value = normalized.slice(equalIndex + 1).trim();
+    if (
+      (value.startsWith("\"") && value.endsWith("\"")) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    process.env[key] = value;
+  }
 }
 
 function chunk(arr, size) {
