@@ -343,8 +343,8 @@ async function exportAuditCsv(query) {
       mappedSampleCount: audit.mappedSampleCount ?? "",
       unmappedCount: audit.unmappedCount ?? "",
       totalFloatMv: audit.totalFloatMv ?? "",
-      marketReturnPct_sectorIndexWeighted: audit.marketReturnPct ?? "",
-      sampleStockWeightedReturnPct_stockWeighted: audit.sampleStockWeightedReturnPct ?? "",
+      sampleSectorProxyReturnPct: audit.sampleSectorProxyReturnPct ?? "",
+      sampleConstituentWeightedReturnPct: audit.sampleConstituentWeightedReturnPct ?? "",
       note: "股票贡献=起始前一交易日流通市值权重*个股区间收益率；行业贡献=行业权重*申万一级行业指数收益率"
     }
   ]));
@@ -364,10 +364,10 @@ async function exportAuditCsv(query) {
     sectorCode: x.sectorCode,
     sectorName: x.sectorName,
     sectorFloatMv_sample: x.sectorFloatMv,
-    sectorWeightPct: x.sectorWeightPct,
+    sectorWeightFraction: x.sectorWeightFraction,
     sectorIndexReturnPct: x.sectorIndexReturnPct,
     sectorContributionPctPoint: x.sectorContributionPctPoint,
-    sampleWeightedStockReturnPct: x.sampleWeightedStockReturnPct,
+    sampleConstituentWeightedReturnPct: x.sampleConstituentWeightedReturnPct,
     sampleStockCount: x.sampleStockCount
   }))));
 
@@ -588,11 +588,11 @@ async function buildHeatmapFromResolvedRange(range, options = {}) {
       hasTrades: range.hasTrades
     },
     market: {
-      returnPct: round(marketReturn, 2),
+      sampleSectorProxyReturnPct: round(marketReturn, 2),
       sampleSize: allCodes.length,
       totalFloatMv: round(totalMv, 2),
       sampleUniverse: `${sampleIndexName}成分股（按申万一级行业分类）`,
-      sampleStockWeightedReturnPct: round(sampleStockWeightedReturn, 2)
+      sampleConstituentWeightedReturnPct: round(sampleStockWeightedReturn, 2)
     },
     benchmarks,
     sectors
@@ -614,10 +614,10 @@ async function buildHeatmapFromResolvedRange(range, options = {}) {
           sectorCode: bucket.sectorCode,
           sectorName: bucket.sectorName,
           sectorFloatMv: bucket.sectorMv,
-          sectorWeightPct: sectorWeight,
+          sectorWeightFraction: sectorWeight,
           sectorIndexReturnPct: hasSectorReturn ? sectorReturn : null,
           sectorContributionPctPoint: sectorWeight * sectorReturn,
-          sampleWeightedStockReturnPct: bucket.sectorMv > 0 ? bucket.weightedReturnSum / bucket.sectorMv : 0,
+          sampleConstituentWeightedReturnPct: bucket.sectorMv > 0 ? bucket.weightedReturnSum / bucket.sectorMv : 0,
           sampleStockCount: bucket.stocks.length
         };
       }),
@@ -627,8 +627,8 @@ async function buildHeatmapFromResolvedRange(range, options = {}) {
         returnPct: Number.isFinite(Number(benchmarkReturns.get(x.code))) ? Number(benchmarkReturns.get(x.code)) : null
       })),
       totalFloatMv: totalMv,
-      marketReturnPct: marketReturn,
-      sampleStockWeightedReturnPct: sampleStockWeightedReturn
+      sampleSectorProxyReturnPct: marketReturn,
+      sampleConstituentWeightedReturnPct: sampleStockWeightedReturn
     };
   }
 
@@ -658,11 +658,11 @@ function buildNoTradeHeatmap(range) {
       hasTrades: false
     },
     market: {
-      returnPct: 0,
+      sampleSectorProxyReturnPct: 0,
       sampleSize: 0,
       totalFloatMv: 0,
       sampleUniverse: "区间内无交易日",
-      sampleStockWeightedReturnPct: 0
+      sampleConstituentWeightedReturnPct: 0
     },
     benchmarks: BENCHMARK_INDEXES.map((x) => ({
       code: x.code,
